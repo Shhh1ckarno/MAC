@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Результаты прогонов
+runs/
+traces/
+*.jsonl
+
+# Генерация отчётов
+reports/node_modules/
+reports/build/
+
+# Прочее
+.DS_Store
+
+results/

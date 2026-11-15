@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>МАС: тушение лесных пожаров</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>МАС тушения лесных пожаров</h1>
+  <div id="status" class="muted">нет соединения</div>
+</header>
+<main>
+  <section class="left">
+    <div class="toolbar">
+      <span id="clock">t = 0</span>
+      <span id="wind">ветер —</span>
+      <label><input type="checkbox" id="showBelief"> карта штаба</label>
+      <label><input type="checkbox" id="showMsgs" checked> сообщения</label>
+      <label><input type="checkbox" id="showRadio"> радиус связи</label>
+      <label><input type="checkbox" id="showPaths" checked> маршруты</label>
+      <label><input type="checkbox" id="showZones"> зоны дронов</label>
+    </div>
+    <canvas id="map"></canvas>
+    <div class="legend">
+      <span><i style="background:#2f6b3a"></i>лес</span>
+      <span><i style="background:#a7c45f"></i>луг</span>
+      <span><i style="background:#b9a988"></i>дорога</span>
+      <span><i style="background:#3d7fd6"></i>вода</span>
+      <span><i style="background:#d9b27c"></i>посёлок</span>
+      <span><i style="background:#ff7a1a"></i>горит</span>
+      <span><i style="background:#2b2b2b"></i>выгорело</span>
+      <span><i style="background:#7b8fa1"></i>потушено</span>
+      <span><b class="sym drone">▲</b>дрон</span>
+      <span><b class="sym crew">●</b>расчёт</span>
+      <span><b class="sym wp">■</b>заправка</span>
+      <span><b class="sym hq">■</b>штаб</span>
+    </div>
+    <div class="panel">
+      <h3>Сообщения такта</h3>
+      <div id="msgs" class="feed"></div>
+    </div>
+  </section>
+  <section class="right">
+    <div class="panel">
+      <h3>Режим</h3>
+      <div class="grid2">
+        <label>Сценарий<select id="scenario"></select></label>
+        <label>Seed<input id="seed" type="number" value="1" min="0"></label>
+        <label class="wide">Механизм распределения задач<select id="mechanism"></select></label>
+        <label>Штаб<select id="hq_mode"><option value="rules">правила</option><option value="llm">LLM</option></select></label>
+        <label>Горизонт<input id="horizon" type="number" value="300" min="20" max="2000"></label>
+        <label>Расчётов<input id="n_crews" type="number" value="5" min="1" max="15"></label>
+        <label>Дронов<input id="n_drones" type="number" value="3" min="0" max="10"></label>
+        <label>Ветер, м/с<input id="wind_speed0" type="number" value="4" min="0" max="12" step="0.5"></label>
+        <label>Потери связи<input id="p_loss_cmd" type="number" value="0" min="0" max="0.9" step="0.05"></label>
+      </div>
+      <div id="llmNote" class="muted small"></div>
+      <div class="buttons">
+        <button id="btnReset">Сброс</button>
+        <button id="btnPlay">▶ Пуск</button>
+        <button id="btnPause">❚❚ Пауза</button>
+        <button id="btnStep">Шаг</button>
+      </div>
+      <label class="small">Скорость <input id="speed" type="range" min="0" max="100" value="70"></label>
+    </div>
+    <div class="panel">
+      <h3>Показатели</h3>
+      <div id="metrics" class="kv"></div>
+      <div id="summary"></div>
+    </div>
+    <div class="panel">
+      <h3>Задачи штаба</h3>
+      <div id="tasks"></div>
+    </div>
+    <div class="panel">
+      <h3>Агенты</h3>
+      <div id="agents"></div>
+    </div>
+    <div class="panel">
+      <h3>Журнал решений</h3>
+      <div id="log" class="feed"></div>
+    </div>
+    <div class="panel" id="llmPanel" hidden>
+      <h3>LLM: последний запрос</h3>
+      <details><summary>промпт</summary><pre id="llmPrompt"></pre></details>
+      <details open><summary>ответ</summary><pre id="llmResponse"></pre></details>
+    </div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
