@@ -8,11 +8,11 @@ const PERF_COLORS = {
 };
 const STATE_RU = {
   IDLE: "свободен", TO_FIRE: "к очагу", EXTINGUISH: "тушит", TO_WATER: "к воде", WAIT_SLOT: "ждёт слот",
-  REFILL: "заправка", RETREAT: "отход", BROKEN: "неисправен", PATROL: "патруль", RETURN: "на базу",
+  WAIT_WATER: "ждет доступную заправку", REFILL: "заправка", RETREAT: "отход", BROKEN: "неисправен", PATROL: "патруль", RETURN: "на базу",
   CHARGE: "зарядка", READY: "готова", BUSY: "занята", TO_BASE: "на базу", COORD: "ведет торги",
 };
 
-let ws = null, world = null, tick = null, cs = 18;
+let ws = null, world = null, tick = null, cs = 18, llmConfigured = false;
 const params = new URLSearchParams(location.search);
 let autoplayUntil = params.has("autoplay") ? Number(params.get("autoplay")) : null;
 const canvas = $("map"), ctx = canvas.getContext("2d");
@@ -25,15 +25,29 @@ function connect() {
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === "init") {
-      world = msg; buildTerrain(); $("summary").innerHTML = "";
+      if (msg.lab !== lab) return;
+      world = msg;
+      tick = null;
+      buildTerrain();
+      $("summary").replaceChildren();
       if (autoplayUntil !== null) send({ cmd: "play", delay: 0.0 });
     }
     else if (msg.type === "tick") {
-      tick = msg; render();
+      if (!world || world.lab !== lab) return;
+      tick = msg;
+      render();
+      updateLabPanels(tick);
       if (autoplayUntil !== null && tick.t >= autoplayUntil) { send({ cmd: "pause" }); autoplayUntil = null; }
     }
-    else if (msg.type === "summary") showSummary(msg.summary);
-    else if (msg.type === "error") alert("Ошибка: " + msg.message);
+    else if (msg.type === "llm_request" && world?.lab === lab && world.config.hq_mode === "llm") {
+      const model = msg.model || "LLM";
+      $("llmNote").textContent = `${model}: ждем ответ с такта ${msg.t}. HTTP-попыток: ${msg.http_attempts}.`;
+    }
+    else if (msg.type === "summary" && world?.lab === lab) showSummary(msg.summary);
+    else if ((msg.type === "outcome" && world?.lab === lab) || msg.type === "error") {
+      $("outcome").textContent = msg.message;
+      $("outcome").hidden = false;
+    }
   };
 }
 
@@ -42,25 +56,69 @@ const delay = () => (100 - Number($("speed").value)) / 100 * 0.8 + 0.01;
 
 function readConfig() {
   const num = (id) => Number($(id).value);
+  const common = { seed: num("seed"), horizon: num("horizon") };
+  if (lab === 3) return { ...common, refill_policy: $("refill_policy").value };
+  if (lab === 4) return { ...common, fault_case: $("fault_case").value, fault_mode: $("fault_mode").value };
   return {
-    scenario: $("scenario").value, seed: num("seed"), mechanism: $("mechanism").value, hq_mode: $("hq_mode").value,
-    horizon: num("horizon"), n_crews: num("n_crews"), n_drones: num("n_drones"),
-    wind_speed0: num("wind_speed0"), p_loss_cmd: num("p_loss_cmd"),
+    ...common, scenario: $("scenario").value, mechanism: $("mechanism").value, hq_mode: $("hq_mode").value,
+    n_crews: num("n_crews"), n_drones: num("n_drones"), wind_speed0: num("wind_speed0"), p_loss_cmd: num("p_loss_cmd"),
   };
 }
-function reset() { send({ cmd: "reset", config: readConfig() }); }
+function reset() {
+  world = null;
+  tick = null;
+  resetLabPanels();
+  showLLMConnection();
+  send({ cmd: "reset", lab, config: readConfig() });
+}
 
 async function loadOptions() {
   const o = await (await fetch("/api/options")).json();
-  $("scenario").innerHTML = o.scenarios.map((s) => `<option value="${s.id}">${s.title}</option>`).join("");
-  $("mechanism").innerHTML = o.mechanisms.map((m) => `<option value="${m.id}">${m.title}</option>`).join("");
-  for (const k of ["scenario", "mechanism", "seed", "hq_mode", "horizon", "n_crews", "n_drones"]) {
+  for (const [id, choices] of Object.entries({
+    scenario: o.scenarios, mechanism: o.mechanisms, alternative: o.mechanisms,
+    refill_policy: o.refill_policies, fault_case: o.fault_cases, fault_mode: o.fault_modes,
+  })) {
+    $(id).replaceChildren(...choices.map(({ id, title }) => new Option(title, id)));
+  }
+  $("fault_mode").value = "after";
+  for (const k of ["scenario", "mechanism", "seed", "hq_mode", "horizon", "n_crews", "n_drones",
+    "refill_policy", "fault_case", "fault_mode"]) {
     if (params.has(k)) $(k).value = params.get(k);
   }
+  $("alternative").value = $("mechanism").value === "cnp" ? "central_greedy" : "cnp";
   if (params.get("belief") === "1") $("showBelief").checked = true;
-  $("llmNote").textContent = o.llm_configured
-    ? "LLM подключена (LLM_BASE_URL задан)."
-    : "LLM не настроена: в режиме «LLM» штаб будет откатываться на правила. Задайте LLM_BASE_URL.";
+  llmConfigured = o.llm_configured;
+}
+
+function showLLMConnection() {
+  $("llmNote").textContent = llmConfigured
+    ? "Адрес LM Studio задан. Связь проверяется при первом запросе."
+    : "Адрес LM Studio не настроен. Запустите сервер с LLM_BASE_URL и LLM_MODEL.";
+}
+
+function renderLLM(tick) {
+  const result = tick.llm?.[0];
+  const status = tick.llm_status;
+  if (status) {
+    const count = `HTTP-попыток: ${status.http_attempts}. Переходов на правила: ${status.fallbacks}.`;
+    if (!status.configured) {
+      $("llmNote").textContent = `Штаб использует правила, пока не задан LLM_BASE_URL. ${count}`;
+    } else {
+      const progress = !result ? "ждем открытый очаг и свободный расчет"
+        : result.error ? `ошибка на такте ${result.t}`
+        : `ответ на такте ${result.t}, принято назначений: ${result.valid?.length ?? 0}`;
+      $("llmNote").textContent = `${status.model || "LLM"}: ${progress}. ${count}`;
+    }
+  }
+  if (result) {
+    $("llmPanel").hidden = false;
+    $("llmPrompt").textContent = result.prompt || "";
+    $("llmResponse").textContent = [
+      result.response,
+      result.error,
+      result.violations?.length ? `Валидатор отклонил: ${result.violations.join(", ")}` : "",
+    ].filter(Boolean).join("\n\n");
+  }
 }
 
 function buildTerrain() {
@@ -149,7 +207,18 @@ function render() {
     const x = cx(a.pos), y = cy(a.pos), r = cs * 0.42;
     ctx.lineWidth = 1.5; ctx.strokeStyle = "#111";
     if (a.kind === "hq") { ctx.fillStyle = "#3d4c6b"; ctx.fillRect(x - r, y - r, 2 * r, 2 * r); ctx.strokeRect(x - r, y - r, 2 * r, 2 * r); }
-    else if (a.kind === "water") { ctx.fillStyle = "#1f6fd6"; ctx.fillRect(x - r, y - r, 2 * r, 2 * r); ctx.strokeRect(x - r, y - r, 2 * r, 2 * r); }
+    else if (a.kind === "water") {
+      ctx.fillStyle = a.broken ? "#7f2635" : "#1f6fd6";
+      ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+      ctx.strokeRect(x - r, y - r, 2 * r, 2 * r);
+      if (a.broken) {
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r);
+        ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r);
+        ctx.stroke();
+      }
+    }
     else if (a.kind === "crew") {
       ctx.fillStyle = a.broken ? "#777" : "#d6302d"; ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); ctx.stroke();
       const frac = a.water / world.config.crew_tank;
@@ -205,15 +274,13 @@ function renderPanels(agents) {
   $("msgs").innerHTML = tick.msgs.slice(-40).reverse().map((x) =>
     `<div><span class="muted">t=${x.t}</span> ${x.from} → ${x.to.join(",")} <b class="perf-${x.perf}">${x.perf}</b> ${x.type}</div>`).join("")
     || `<span class="muted">нет</span>`;
-  $("log").innerHTML = tick.log.slice().reverse().map((s) => `<div>${s}</div>`).join("");
+  $("log").replaceChildren(...tick.log.slice().reverse().map((text) => {
+    const line = document.createElement("div");
+    line.textContent = text;
+    return line;
+  }));
 
-  if (tick.llm && tick.llm.length) {
-    const r = tick.llm[0];
-    $("llmPanel").hidden = false;
-    $("llmPrompt").textContent = r.prompt || "";
-    $("llmResponse").textContent = (r.response || r.error || "") +
-      (r.violations && r.violations.length ? `\n\nВалидатор отклонил: ${r.violations.join("; ")}` : "");
-  }
+  renderLLM(tick);
 }
 
 function showSummary(s) {
@@ -236,4 +303,18 @@ $("btnStep").onclick = () => send({ cmd: "step" });
 $("speed").oninput = () => send({ cmd: "speed", delay: delay() });
 for (const id of ["showBelief", "showMsgs", "showRadio", "showPaths", "showZones"]) $(id).onchange = render;
 
-loadOptions().then(connect);
+for (const button of document.querySelectorAll("[data-lab-button]")) {
+  button.onclick = () => selectLab(Number(button.dataset.labButton));
+}
+for (const id of ["hq_mode", "refill_policy", "fault_case", "fault_mode"]) $(id).onchange = reset;
+$("mechanism").onchange = () => {
+  if ($("alternative").value === $("mechanism").value) {
+    $("alternative").value = $("mechanism").value === "cnp" ? "central_greedy" : "cnp";
+  }
+};
+$("btnCompare").onclick = compareRuns;
+loadOptions().then(() => {
+  const initial = Number(params.get("lab"));
+  selectLab([1, 2, 3, 4].includes(initial) ? initial : 1);
+  connect();
+}).catch(() => { $("status").textContent = "не удалось загрузить настройки"; });

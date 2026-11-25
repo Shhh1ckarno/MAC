@@ -53,6 +53,8 @@ class SimConfig:
     crew_refill_threshold: int = 1
     cells_per_crew: int = 8
 
+    refill_policy: str = "fifo"
+    reliability_guards: bool = False
     water_capacity: int = 1
     refill_time: int = 5
     noshow_timeout: int = 15
@@ -71,6 +73,7 @@ class SimConfig:
     llm_model: str = ""
     llm_timeout: float = 60.0
     llm_min_interval: int = 5
+    llm_retry_ticks: int = 15
 
     extra: dict = field(default_factory=dict)
 
@@ -79,6 +82,12 @@ class SimConfig:
             raise ValueError(f"Неизвестный механизм {self.mechanism!r}; допустимо: {MECHANISMS}")
         if self.hq_mode not in HQ_MODES:
             raise ValueError(f"Неизвестный режим штаба {self.hq_mode!r}; допустимо: {HQ_MODES}")
+        if self.refill_policy not in ("fifo", "priority"):
+            raise ValueError("Режим очереди должен быть fifo или priority")
+        if self.water_capacity < 1 or self.refill_time < 1:
+            raise ValueError("Вместимость и время заправки должны быть положительными")
+        if self.llm_retry_ticks < 1:
+            raise ValueError("Пауза между повторными запросами LLM должна быть положительной")
         if self.width < 10 or self.height < 10:
             raise ValueError("Карта слишком мала")
         return self

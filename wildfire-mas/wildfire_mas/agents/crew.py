@@ -27,6 +27,7 @@ class CrewAgent(Agent):
         self.path_goal: Pos | None = None
         self.slot: dict | None = None
         self.wp_wait: dict[str, int] = {}
+        self.wp_unavailable_until: dict[str, int] = {}
         self.outstanding: dict | None = None
         self.hb_offset = index
         self.last_report_t = -100
@@ -129,22 +130,40 @@ class CrewAgent(Agent):
                     self.tasks_done += 1
                 self.task = None
                 self.path = []
-        elif m.perf == Perf.AGREE and ct == "SlotGrant":
-            if self.slot and self.slot["wp"] == m.sender:
-                self.slot["granted"] = int(m.content["slot"])
-            self.wp_wait[m.sender] = max(0, int(m.content["slot"]) - t)
-        elif m.perf == Perf.REFUSE and ct == "SlotGrant":
-            self.wp_wait[m.sender] = 999
-            if self.slot and self.slot["wp"] == m.sender:
-                self.slot = None
-        elif m.perf == Perf.CANCEL and ct == "SlotGrant":
-            if self.slot and self.slot["wp"] == m.sender:
-                self.slot = None
-        elif m.perf == Perf.INFORM and ct == "RefillDone":
+        elif ct in ("SlotGrant", "SlotStarted", "RefillDone") and m.channel == Channel.RES:
+            self._handle_refill(t, m)
+
+    def _handle_refill(self, t: int, m: Message) -> None:
+        matches = self.slot and self.slot["wp"] == m.sender and self.slot["cid"] == m.cid
+        if not matches:
+            return
+        if m.perf == Perf.AGREE and m.ctype == "SlotGrant":
+            self.slot["granted"] = int(m.content["slot"])
+            self.wp_wait[m.sender] = max(0, self.slot["granted"] - t)
+        elif m.perf == Perf.INFORM and m.ctype == "SlotStarted":
+            self.slot["started"] = True
+            self.slot["deadline"] = t + self.cfg.refill_time + self.cfg.cmd_latency + 1
+        elif m.perf in (Perf.REFUSE, Perf.CANCEL):
+            if m.content.get("reason") == "out_of_service":
+                self._avoid_post(t, m.sender, "out_of_service")
+            self.slot = None
+        elif m.perf == Perf.INFORM and m.ctype == "RefillDone":
             self.slot = None
             if self.intention == "REFILL":
                 self.intention = "IDLE"
             self.note(t, f"заправлен на {m.sender}")
+
+    def _avoid_post(self, t: int, wp: str, reason: str) -> None:
+        if not self.cfg.reliability_guards:
+            self.wp_wait[wp] = 999
+            return
+        if reason == "out_of_service":
+            self.wp_unavailable_until[wp] = self.cfg.horizon + 1
+        else:
+            self.wp_unavailable_until[wp] = t + self.cfg.hb_timeout + self.cfg.noshow_timeout
+        self.wp_wait.pop(wp, None)
+        self.api.record("post_unavailable", post=wp, reason=reason)
+
 
     def _answer_cfps(self, t: int) -> None:
         cfps, self._pending_cfps = self._pending_cfps, []
@@ -223,7 +242,8 @@ class CrewAgent(Agent):
             self.intention = "REFILL"
         elif self.task:
             if self.slot is not None:
-                api.send(Perf.CANCEL, self.slot["wp"], {"type": "SlotRequest"}, channel=Channel.RES)
+                api.send(Perf.CANCEL, self.slot["wp"], {"type": "SlotRequest"},
+                         channel=Channel.RES, cid=self.slot["cid"])
                 self.slot = None
             self.intention = "EXTINGUISH"
         elif api.water < self.cfg.crew_tank // 2:
@@ -272,21 +292,40 @@ class CrewAgent(Agent):
             self.api.act(("move", [best]))
         self.path = []
 
-    def _choose_wp(self, t: int) -> str:
-        pos = self.api.pos
-        return min(self.K.water_points, key=lambda w: cheb(self.K.water_points[w], pos) + self.wp_wait.get(w, 0))
+    def _choose_wp(self, t: int) -> str | None:
+        available = (w for w in self.K.water_points if self.wp_unavailable_until.get(w, 0) <= t)
+        return min(available, default=None,
+                   key=lambda w: cheb(self.K.water_points[w], self.api.pos) + self.wp_wait.get(w, 0))
 
     def _do_refill(self, t: int) -> None:
         api = self.api
+        if self.slot and self.cfg.reliability_guards and t >= self.slot["deadline"]:
+            wp, cid = self.slot["wp"], self.slot["cid"]
+            api.send(Perf.CANCEL, wp, {"type": "SlotRequest"}, channel=Channel.RES, cid=cid)
+            self._avoid_post(t, wp, "timeout")
+            self.slot = None
         if self.slot is None:
             wp = self._choose_wp(t)
+            if wp is None:
+                self.state = "WAIT_WATER"
+                api.act(("wait",))
+                return
             eta = t + cheb(self.K.water_points[wp], api.pos)
-            self.slot = {"wp": wp, "granted": None, "t_req": t}
-            api.send(Perf.REQUEST, wp, {"type": "SlotRequest", "eta": eta, "amount": self.cfg.crew_tank - api.water},
-                     channel=Channel.RES, cid=f"slot-{self.id}-{t}")
+            cid = f"slot-{self.id}-{t}"
+            deadline = eta + self.cfg.noshow_timeout + self.cfg.n_crews * self.cfg.refill_time
+            deadline += 2 * max(1, self.cfg.cmd_latency)
+            self.slot = {"wp": wp, "granted": None, "cid": cid, "started": False, "deadline": deadline}
+            priority = self.task["priority"] if self.task else 0
+            api.send(Perf.REQUEST, wp, {"type": "SlotRequest", "eta": eta,
+                                       "amount": self.cfg.crew_tank - api.water, "priority": priority},
+                     channel=Channel.RES, cid=cid)
         wp_pos = self.K.water_points[self.slot["wp"]]
         if api.pos == wp_pos:
-            self.state = "REFILL" if self.slot.get("granted") is not None and self.slot["granted"] <= t else "WAIT_SLOT"
+            started = self.slot["started"]
+            if self.cfg.refill_policy == "fifo" and not self.cfg.reliability_guards:
+                granted = self.slot["granted"]
+                started = granted is not None and granted <= t
+            self.state = "REFILL" if started else "WAIT_SLOT"
             self.wait_ticks += 1
             api.act(("wait",))
             return

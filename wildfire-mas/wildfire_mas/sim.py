@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from .agents import AgentAPI, CrewAgent, DroneAgent, HQAgent, Knowledge, WaterPointAgent
-from .comm import MessageBus
+from .comm import MessageBus, Perf
 from .config import SimConfig
 from .coordination import make_coordinator
 from .env import Body, Environment, Phase
@@ -16,7 +16,7 @@ from .scenarios import apply_scenario
 
 
 class Simulation:
-    def __init__(self, cfg: SimConfig, trace_path: str | Path | None = None, coordinator=None):
+    def __init__(self, cfg: SimConfig, trace_path: str | Path | None = None, coordinator=None, fault=None):
         cfg, scenario = apply_scenario(cfg.validate())
         self.cfg = cfg
         ss = np.random.SeedSequence(cfg.seed)
@@ -32,7 +32,8 @@ class Simulation:
             self._create_agents(coordinator)
         self.metrics = Metrics(self)
         self._trace = open(trace_path, "w", encoding="utf-8") if trace_path else None
-        self.events: list[str] = []
+        self.fault = fault
+        self.tick_events: list[dict] = []
 
     def _create_agents(self, coordinator) -> None:
         cfg, ter = self.cfg, self.env.terrain
@@ -76,7 +77,14 @@ class Simulation:
     def step(self) -> None:
         t = self.env.t
         self.bus.new_tick()
+        self.tick_events.clear()
+        if self.fault:
+            self.fault.before_delivery(self, t)
         inbox = self.bus.deliver(t)
+        if self.fault:
+            self.fault.after_delivery(self, inbox)
+        if self.cfg.reliability_guards:
+            self._validate_reports(t, inbox)
         self._observe_deliveries(t, inbox)
         for aid in self.order:
             agent = self.agents[aid]
@@ -89,12 +97,62 @@ class Simulation:
             self._write_trace(t)
 
     def run(self) -> dict:
-        while not self.done:
-            self.step()
-        if self._trace:
-            self._trace.close()
-            self._trace = None
-        return self.metrics.summary()
+        try:
+            while not self.done:
+                self.step()
+            result = self.metrics.summary()
+            self._write_record({"type": "outcome", "status": "completed", "t": self.t})
+            return result
+        except Exception as exc:
+            self._write_record({"type": "outcome", "status": "failed", "t": self.t,
+                                "error": str(exc), "events": self.tick_events})
+            raise
+        finally:
+            if self._trace:
+                self._trace.close()
+                self._trace = None
+
+    def record(self, event: str, **data) -> None:
+        entry = {"t": self.t, "event": event, **data}
+        self.tick_events.append(entry)
+        if self.fault:
+            self.fault.observe(entry)
+
+    def _validate_reports(self, t: int, inbox) -> None:
+        def inside(x, y):
+            return type(x) is int and type(y) is int and self.env.terrain.inside((x, y))
+
+        def error(m):
+            sender = self.env.bodies.get(m.sender)
+            if not sender or sender.kind not in ("drone", "crew") or m.perf != Perf.INFORM:
+                return "report_sender"
+            payload = m.content
+            area = payload.get("area")
+            if (not isinstance(area, (tuple, list)) or len(area) != 3
+                    or not inside(*area[:2]) or type(area[2]) is not int
+                    or not 0 <= area[2] <= max(self.cfg.drone_radius, self.cfg.crew_radius)):
+                return "report_area"
+            t_obs = payload.get("t_obs")
+            if type(t_obs) is not int or not 0 <= t_obs <= min(t, m.t_send):
+                return "report_time"
+            cells = payload.get("cells")
+            if not isinstance(cells, list):
+                return "report_cells"
+            for c in cells:
+                if (not isinstance(c, (tuple, list)) or len(c) != 3 or not inside(*c[:2])
+                        or type(c[2]) not in (int, float) or not 0 <= c[2] <= 1):
+                    return "report_cell"
+            return None
+
+        for recipient, messages in inbox.items():
+            accepted = []
+            for m in messages:
+                reason = error(m) if m.ctype == "FireReport" else None
+                if reason:
+                    self.record("report_rejected", message=m.id, sender=m.sender, recipient=recipient, reason=reason)
+                else:
+                    accepted.append(m)
+            inbox[recipient] = accepted
 
     def _observe_deliveries(self, t: int, inbox) -> None:
         fire = self.env.fire
@@ -121,16 +179,17 @@ class Simulation:
                     b.battery -= 1
                     if b.battery <= 0:
                         b.broken = True
-                        self.events.append(f"t={env.t} {aid}: батарея разряжена — дрон потерян")
+                        self.record("drone_depleted", agent=aid)
             elif b.kind == "crew" and a:
                 if a[0] == "move":
                     env.move_crew(b, [tuple(p) for p in a[1]])
                 elif a[0] == "extinguish":
                     env.extinguish(b, tuple(a[1]))
             elif b.kind == "water" and a and a[0] == "serve":
-                crew = env.bodies.get(a[1])
-                if crew is not None and crew.pos == b.pos:
-                    env.refill(crew, int(a[2]))
+                for crew_id in a[1]:
+                    crew = env.bodies.get(crew_id)
+                    if crew and crew.kind == "crew" and not crew.broken and crew.pos == b.pos and not b.broken:
+                        env.refill(crew, cfg.crew_tank)
 
     def init_payload(self) -> dict:
         ter = self.env.terrain
@@ -170,7 +229,12 @@ class Simulation:
         }
 
     def _write_trace(self, t: int) -> None:
-        rec = {"t": t, "metrics": self.metrics.live(),
-               "agents": [self.agents[a].public_state() for a in self.order],
-               "msgs": [{**m.brief(), "content": m.content} for m in self.bus.sent_log]}
-        self._trace.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+        self._write_record({
+            "t": t, "metrics": self.metrics.live(), "events": self.tick_events,
+            "agents": [self.agents[a].public_state() for a in self.order],
+            "msgs": [{**m.brief(), "content": m.content} for m in self.bus.sent_log],
+        })
+
+    def _write_record(self, record: dict) -> None:
+        if self._trace:
+            self._trace.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")

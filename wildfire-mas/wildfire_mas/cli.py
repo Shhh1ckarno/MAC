@@ -105,6 +105,29 @@ def cmd_lab2_llm(a) -> None:
     analyze_llm(Path(a.out))
 
 
+def cmd_lab3(a) -> None:
+    from pathlib import Path
+
+    from .lab_experiments import run_lab3
+    run_lab3(Path(a.out), a.seeds, a.workers)
+    print(f"Результаты ЛР 3: {a.out}")
+
+
+def cmd_lab4(a) -> None:
+    from pathlib import Path
+
+    from .lab_experiments import run_lab4
+    run_lab4(Path(a.out), a.seeds, a.workers)
+    print(f"Результаты ЛР 4: {a.out}")
+
+
+def _positive(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("требуется положительное число")
+    return number
+
+
 def cmd_serve(a) -> None:
     import uvicorn
     uvicorn.run("wildfire_mas.web.server:app", host=a.host, port=a.port, log_level="info")
@@ -145,6 +168,16 @@ def main(argv: list[str] | None = None) -> None:
     ll.add_argument("--out", default="results/lab2")
     ll.add_argument("--analyze-only", action="store_true")
     ll.set_defaults(fn=cmd_lab2_llm)
+
+    for name, title, handler in (
+        ("lab3", "конфликт за место на заправке", cmd_lab3),
+        ("lab4", "сценарии отказа и восстановление", cmd_lab4),
+    ):
+        lab = sub.add_parser(name, help=title)
+        lab.add_argument("--seeds", type=_positive, default=30)
+        lab.add_argument("--workers", type=_positive, default=4)
+        lab.add_argument("--out", default=f"results/{name}")
+        lab.set_defaults(fn=handler)
 
     s = sub.add_parser("serve", help="веб-интерфейс")
     s.add_argument("--host", default="127.0.0.1")

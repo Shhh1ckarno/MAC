@@ -25,6 +25,7 @@ class LLMClient:
         self.api_key = os.environ.get("LLM_API_KEY", "lm-studio")
         self.timeout = timeout
         self.use_schema = True
+        self.http_attempts = 0
         self.reasoning_effort = os.environ.get("LLM_REASONING_EFFORT", "none")
 
     @property
@@ -47,11 +48,13 @@ class LLMClient:
                                        "json_schema": {"name": "plan", "strict": True, "schema": schema}}
         t0 = time.perf_counter()
         try:
+            self.http_attempts += 1
             r = httpx.post(f"{self.base_url}/chat/completions", json=body, timeout=self.timeout,
                            headers={"Authorization": f"Bearer {self.api_key}"})
             if r.status_code == 400 and "response_format" in body:
                 self.use_schema = False
                 body.pop("response_format")
+                self.http_attempts += 1
                 r = httpx.post(f"{self.base_url}/chat/completions", json=body, timeout=self.timeout,
                                headers={"Authorization": f"Bearer {self.api_key}"})
             r.raise_for_status()

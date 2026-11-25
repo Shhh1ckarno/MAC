@@ -79,6 +79,7 @@ class LLMCoordinator(Coordinator):
         self.name = "llm"
         self.last_call_t = -10**9
         self.last_events = -1
+        self.retry_at = None
         self.stats = {"calls": 0, "ok": 0, "invalid": 0, "errors": 0, "fallbacks": 0, "latency": 0.0,
                       "violations": 0}
         self.history: list[dict] = []
@@ -108,6 +109,9 @@ class LLMCoordinator(Coordinator):
         tasks = hq.open_tasks()
         if not free or not tasks:
             return
+        if self.retry_at is not None and t < self.retry_at:
+            self._fallback(hq, t, "пауза перед повторным обращением")
+            return
         new_events = hq.events_since_decision != self.last_events
         if not new_events and t - self.last_call_t < self.cfg.llm_min_interval:
             return
@@ -116,7 +120,10 @@ class LLMCoordinator(Coordinator):
         self.stats["calls"] += 1
         record = {"t": t, "prompt": prompt}
         try:
+            hq.api.record("llm_call")
             reply = self.client.chat(SYSTEM_PROMPT, prompt, PLAN_SCHEMA)
+            hq.api.record("llm_response")
+            self.retry_at = None
             self.stats["latency"] += reply.latency
             record.update(response=reply.text, latency=round(reply.latency, 2))
             plan = extract_json(reply.text)
@@ -135,7 +142,10 @@ class LLMCoordinator(Coordinator):
             else:
                 self.stats["invalid"] += 1
                 self._fallback(hq, t, "пустой или невалидный план")
-        except (LLMError, ValueError, json.JSONDecodeError) as e:
+        except (LLMError, ValueError) as e:
+            hq.api.record("llm_error", reason=type(e).__name__)
+            if self.cfg.reliability_guards:
+                self.retry_at = t + self.cfg.llm_retry_ticks
             self.stats["errors"] += 1
             record["error"] = str(e)
             self._fallback(hq, t, str(e)[:120])
@@ -143,6 +153,7 @@ class LLMCoordinator(Coordinator):
 
     def _fallback(self, hq, t: int, why: str) -> None:
         self.stats["fallbacks"] += 1
+        hq.api.record("llm_fallback", reason=why)
         hq.note(t, f"откат на правила: {why}")
         self.fallback.allocate(hq, t)
 

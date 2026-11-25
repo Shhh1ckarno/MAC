@@ -11,6 +11,12 @@
   <h1>МАС тушения лесных пожаров</h1>
   <div id="status" class="muted">нет соединения</div>
 </header>
+<nav class="lab-nav" aria-label="Лабораторные работы">
+  <button data-lab-button="1" aria-pressed="true">ЛР 1 · Архитектура</button>
+  <button data-lab-button="2" aria-pressed="false">ЛР 2 · Координация</button>
+  <button data-lab-button="3" aria-pressed="false">ЛР 3 · Заправка</button>
+  <button data-lab-button="4" aria-pressed="false">ЛР 4 · Надежность</button>
+</nav>
 <main>
   <section class="left">
     <div class="toolbar">
@@ -37,6 +43,30 @@
       <span><b class="sym wp">■</b>заправка</span>
       <span><b class="sym hq">■</b>штаб</span>
     </div>
+    <div class="panel" data-labs="1">
+      <h3>Роли и каналы связи</h3>
+      <dl class="roles">
+        <div><dt>Штаб</dt><dd>Собирает донесения, назначает расчеты по командному каналу.</dd></div>
+        <div><dt>Дрон</dt><dd>Разведывает очаги и передает донесения. В распределенном режиме объявляет торги по радио.</dd></div>
+        <div><dt>Расчет</dt><dd>Тушит очаги и бронирует заправку по ресурсному каналу.</dd></div>
+        <div><dt>Заправка</dt><dd>Принимает заявки расчетов и обслуживает очередь.</dd></div>
+      </dl>
+    </div>
+    <div class="panel" data-labs="2 3 4" hidden>
+      <h3>Сравнение двух прогонов</h3>
+      <div class="compare-controls">
+        <label data-labs="2" hidden>Второй механизм<select id="alternative"></select></label>
+        <button id="btnCompare" type="button">Сравнить на одном seed</button>
+      </div>
+      <p class="muted small" id="comparisonStatus" role="status"></p>
+      <div id="comparisonOutput" hidden>
+        <h4>Ущерб по тактам</h4>
+        <div class="comparison-legend" id="comparisonLegend"></div>
+        <canvas id="comparisonChart" width="800" height="270" role="img" aria-label="Динамика ущерба в двух прогонах"></canvas>
+        <div id="comparisonTable" class="table-scroll"></div>
+        <p class="muted small" id="comparisonOutcome"></p>
+      </div>
+    </div>
     <div class="panel">
       <h3>Сообщения такта</h3>
       <div id="msgs" class="feed"></div>
@@ -45,18 +75,22 @@
   <section class="right">
     <div class="panel">
       <h3>Режим</h3>
+      <p id="labNote" class="muted small"></p>
       <div class="grid2">
-        <label>Сценарий<select id="scenario"></select></label>
+        <label data-labs="1 2">Сценарий<select id="scenario"></select></label>
         <label>Seed<input id="seed" type="number" value="1" min="0"></label>
-        <label class="wide">Механизм распределения задач<select id="mechanism"></select></label>
-        <label>Штаб<select id="hq_mode"><option value="rules">правила</option><option value="llm">LLM</option></select></label>
+        <label class="wide" data-labs="1 2">Механизм распределения задач<select id="mechanism"></select></label>
+        <label data-labs="1 2">Штаб<select id="hq_mode"><option value="rules">правила</option><option value="llm">LLM</option></select></label>
         <label>Горизонт<input id="horizon" type="number" value="300" min="20" max="2000"></label>
-        <label>Расчётов<input id="n_crews" type="number" value="5" min="1" max="15"></label>
-        <label>Дронов<input id="n_drones" type="number" value="3" min="0" max="10"></label>
-        <label>Ветер, м/с<input id="wind_speed0" type="number" value="4" min="0" max="12" step="0.5"></label>
-        <label>Потери связи<input id="p_loss_cmd" type="number" value="0" min="0" max="0.9" step="0.05"></label>
+        <label data-labs="1 2">Расчётов<input id="n_crews" type="number" value="5" min="1" max="15"></label>
+        <label data-labs="1 2">Дронов<input id="n_drones" type="number" value="3" min="0" max="10"></label>
+        <label data-labs="1 2">Ветер, м/с<input id="wind_speed0" type="number" value="4" min="0" max="12" step="0.5"></label>
+        <label data-labs="1 2">Потери связи<input id="p_loss_cmd" type="number" value="0" min="0" max="0.9" step="0.05"></label>
+        <label class="wide" data-labs="3" hidden>Правило заправки<select id="refill_policy"></select></label>
+        <label class="wide" data-labs="4" hidden>Сбой<select id="fault_case"></select></label>
+        <label class="wide" data-labs="4" hidden>Защита<select id="fault_mode"></select></label>
       </div>
-      <div id="llmNote" class="muted small"></div>
+      <div id="llmNote" class="muted small" data-labs="1 2" role="status"></div>
       <div class="buttons">
         <button id="btnReset">Сброс</button>
         <button id="btnPlay">▶ Пуск</button>
@@ -69,6 +103,16 @@
       <h3>Показатели</h3>
       <div id="metrics" class="kv"></div>
       <div id="summary"></div>
+      <p id="outcome" class="outcome small" role="status" hidden></p>
+    </div>
+    <div class="panel" id="queuePanel" data-labs="3 4" hidden>
+      <h3>Заправка</h3>
+      <div id="queue"></div>
+    </div>
+    <div class="panel" data-labs="3 4" hidden>
+      <h3>События эксперимента</h3>
+      <p id="faultState" class="small" data-labs="4" hidden></p>
+      <ol id="labActivity" class="activity"></ol>
     </div>
     <div class="panel">
       <h3>Задачи штаба</h3>
@@ -89,6 +133,7 @@
     </div>
   </section>
 </main>
+<script src="/static/lab-ui.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

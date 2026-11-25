@@ -68,6 +68,9 @@ class AgentAPI:
             raise PermissionError(f"Действие {action[0]} недоступно агенту {self._body.id}")
         self.pending_action = action
 
+    def record(self, event: str, **data) -> None:
+        self._sim.record(event, agent=self._body.id, **data)
+
     def send(self, perf: Perf, receivers: list[str] | str, content: dict, channel: Channel = Channel.CMD,
              cid: str | None = None, reply: int | None = None, hops: int = 0) -> Message:
         if isinstance(receivers, str):
